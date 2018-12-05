@@ -18,6 +18,9 @@
 #include "opencv2/highgui/highgui.hpp"
 #include "opencv2/imgproc/imgproc.hpp"
 #include "cv-helpers.hpp"
+#include "opencv2/dnn/dnn.hpp"
+
+#include "actionmodule.h"
 
 using namespace rs400;
 using namespace rs2;
@@ -27,12 +30,39 @@ using namespace cv;
 const size_t inWidth = 600;
 const size_t inHeight = 900;
 const float WHRatio = inWidth / (float)inHeight;
-const float inScaleFactor = 0.007843f;
-const float meanVal = 127.5;
+int mat_columns;
+int mat_rows;
+int length_to_mid;
+int pixal_to_bottom;
+int pixal_to_left;
+double alpha = 0;
+double last_x_meter = 0;
+double this_x_meter = 0;
+double last_y_meter = 0;
+double this_y_meter = 0;
+double y_vel = 0;
+double x_vel = 0;
+double velocity;
+double alphaset[5] = { 0 };
+double alpha_mean = 0;
+double move_distance = 0;
+double first_magic_distance = 5;
+int count = 0;
+int magic_distance_flag = 1;
+string move_direction;
+int last_frame_length = 50;
+int last_frame_pixal = 480;
+
 
 rs2_stream find_stream_to_align(const std::vector<rs2::stream_profile>& streams);
 
-mutex mtx;
+double depth_length_coefficient(double depth) {
+	double length;
+	length = 48.033*depth + 5.4556;
+	return length;
+}
+
+//mutex mtx;
 
 template <typename T>
 void change(T *p, T *q) {
@@ -45,9 +75,7 @@ void change(T *p, T *q) {
 void get_video(rs2::pipeline &pipe, rs2::frameset *latest_frameset, rs2::frameset *new_frameset) {
 	while (true) {
 		*new_frameset = pipe.wait_for_frames();
-		mtx.lock();
 		change(latest_frameset, new_frameset);
-		mtx.unlock();
 	}
 }
 
@@ -57,10 +85,8 @@ void frame_transfer(rs2::align &align, rs2::pipeline &pipe, rs2::frameset *lates
 	rs2::depth_frame depth_frame = processed.get_depth_frame();
 	*pt_new_color_mat = frame_to_mat(color_frame);
 	*pt_new_depth_mat = depth_frame_to_meters(pipe, depth_frame);
-	mtx.lock();
 	change(pt_color_mat, pt_new_color_mat);
 	change(pt_depth_mat, pt_new_depth_mat);
-	mtx.unlock();
 }
 
 int main(int argc, char * argv[]) try{
@@ -132,7 +158,7 @@ int main(int argc, char * argv[]) try{
 	cvCreateTrackbar("LowV", "Control", &iLowV, 255); //Value (0 - 255)
 	cvCreateTrackbar("HighV", "Control", &iHighV, 255);
 
-	std::ifstream config("F:/config.json");
+	std::ifstream config("F:/config2.json");
 	std::string str((std::istreambuf_iterator<char>(config)),
 		std::istreambuf_iterator<char>());
 	rs400::advanced_mode dev4json = profile.get_device();
@@ -182,6 +208,9 @@ int main(int argc, char * argv[]) try{
 
 		Mat Gcolor_mat;
 		GaussianBlur(*pt_color_mat, Gcolor_mat, Size(11, 11), 0);
+		cvtColor(Gcolor_mat, Gcolor_mat, COLOR_BGR2RGB);
+		//imshow(window_name, Gcolor_mat);
+
 		Gcolor_mat = Gcolor_mat(crop);
 		auto depth_mat2 = (*pt_depth_mat)(crop);
 		Mat imgHSV;
@@ -231,16 +260,67 @@ int main(int argc, char * argv[]) try{
 		auto center = (object.br() + object.tl())*0.5;
 		center.x = center.x - labelSize.width / 2;
 		center.y = center.y + 30;
+
 		rectangle(Gcolor_mat, Rect(Point(center.x, center.y - labelSize.height),
 			Size(labelSize.width, labelSize.height + baseLine)),
 			Scalar(255, 255, 255), CV_FILLED);
+
 		putText(Gcolor_mat, ss.str(), center,
 			FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 0, 0));
+		/////////////////////////////////////////////////////////////////
+		length_to_mid = (moment.m10 / moment.m00 - 200)*depth_length_coefficient(magic_distance) / 320;
+		pixal_to_left = moment.m10 / moment.m00;
+		pixal_to_bottom = (480 - moment.m01 / moment.m00);
+		cout << endl << "length to midline =" << length_to_mid << "    ";
+		if (magic_distance_flag == 1 && abs(length_to_mid) == 0) {
+			first_magic_distance = magic_distance;
+			magic_distance_flag = 0;
+		}
+
+
 		imshow(window_name, Gcolor_mat);
-		waitKey(3);
+		if (waitKey(1) >= 0) break;
+		// imshow("heatmap", depth_mat);
+		this_x_meter = magic_distance;
+		this_y_meter = abs(length_to_mid);
+
+		if (pixal_to_bottom == 480 && last_frame_pixal<100) {
+			ZActionModule::instance()->sendPacket(2, 10, 0, 0, true);
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			cout << "0" << endl;
+		}
+		else {
+			if (pixal_to_left == 0 && last_frame_length > 0) {
+				ZActionModule::instance()->sendPacket(2, 0, 0, 30);
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				cout << "1" << endl;
+			}
+			else if (pixal_to_left == 0 && last_frame_length < 0) {
+				ZActionModule::instance()->sendPacket(2, 0, 0, -30);
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				cout << "2" << endl;
+			}
+			else {
+				int flag = 1;
+				if (length_to_mid >0) {
+					flag = 1;
+				}
+				else if (length_to_mid < 0) {
+					flag = -1;
+				}
+				else {
+					flag = 0;
+				}
+				ZActionModule::instance()->sendPacket(2, 0, 0, 3.0 * length_to_mid + flag * 5);
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				last_frame_length = length_to_mid;
+				last_frame_pixal = pixal_to_bottom;
+			}
+		}
+		//waitKey(3);
 		cout << "All   " << 1000 * ((double)(clock() - time)) / CLOCKS_PER_SEC << endl;
-		
-    }
+
+	}//end of while
     return EXIT_SUCCESS;
 }
 catch (const rs2::error & e)
