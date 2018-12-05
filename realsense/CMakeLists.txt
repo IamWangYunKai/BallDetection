@@ -7,6 +7,8 @@ project (${PROJ_NAME})
 SET(INCLUDE_DIRS ${CMAKE_CURRENT_LIST_DIR}/include
 				 ${CMAKE_CURRENT_LIST_DIR}/samples
                  ${CMAKE_CURRENT_LIST_DIR}/third-party/glfw-imgui/include
+                 ${CMAKE_CURRENT_LIST_DIR}/include/opencv
+                 ${CMAKE_CURRENT_LIST_DIR}/include/opencv2
                  )
 
 # 源文件
@@ -15,6 +17,7 @@ file(GLOB SOURCE "${CMAKE_CURRENT_LIST_DIR}/rs-align.cpp")
 # 链接文件
 file(GLOB LINK_DIRS ${CMAKE_CURRENT_LIST_DIR}/lib/x64/realsense2.lib
 					${CMAKE_CURRENT_LIST_DIR}/lib/x64/glfw-imgui.lib
+					${CMAKE_CURRENT_LIST_DIR}/lib/opencv_world343.lib
 					)
 
 # 添加头文件

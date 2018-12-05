@@ -1,6 +1,3 @@
-// License: Apache 2.0. See LICENSE file in root directory.
-// Copyright(c) 2017 Intel Corporation. All Rights Reserved.
-
 #include <librealsense2/rs.hpp>
 #include <librealsense2/rs_advanced_mode.hpp>
 #include "example.hpp"
@@ -14,50 +11,81 @@
 #include <cstring>
 #include <ctime>
 
+#include <thread>
+#include <chrono>
+#include <mutex>
+
+#include "opencv2/highgui/highgui.hpp"
+#include "opencv2/imgproc/imgproc.hpp"
+#include "cv-helpers.hpp"
+
 using namespace rs400;
 using namespace rs2;
 using namespace std;
+using namespace cv;
 
-void render_slider(rect location, float& clipping_dist);
-void remove_background(rs2::video_frame& other, const rs2::depth_frame& depth_frame, float depth_scale, float clipping_dist);
-float get_depth_scale(rs2::device dev);
+const size_t inWidth = 600;
+const size_t inHeight = 900;
+const float WHRatio = inWidth / (float)inHeight;
+const float inScaleFactor = 0.007843f;
+const float meanVal = 127.5;
+
 rs2_stream find_stream_to_align(const std::vector<rs2::stream_profile>& streams);
-bool profile_changed(const std::vector<rs2::stream_profile>& current, const std::vector<rs2::stream_profile>& prev);
 
-int main(int argc, char * argv[]) try
-{
+mutex mtx;
+
+template <typename T>
+void change(T *p, T *q) {
+	T tmp;
+	tmp = *p;
+	*p = *q;
+	*q = tmp;
+}
+
+void get_video(rs2::pipeline &pipe, rs2::frameset *latest_frameset, rs2::frameset *new_frameset) {
+	while (true) {
+		*new_frameset = pipe.wait_for_frames();
+		mtx.lock();
+		change(latest_frameset, new_frameset);
+		mtx.unlock();
+	}
+}
+
+void frame_transfer(rs2::align &align, rs2::pipeline &pipe, rs2::frameset *latest_frameset, Mat *pt_color_mat, Mat *pt_new_color_mat, Mat *pt_depth_mat, Mat *pt_new_depth_mat) {
+	auto processed = align.process(*latest_frameset);
+	rs2::video_frame color_frame = processed.get_color_frame();
+	rs2::depth_frame depth_frame = processed.get_depth_frame();
+	*pt_new_color_mat = frame_to_mat(color_frame);
+	*pt_new_depth_mat = depth_frame_to_meters(pipe, depth_frame);
+	mtx.lock();
+	change(pt_color_mat, pt_new_color_mat);
+	change(pt_depth_mat, pt_new_depth_mat);
+	mtx.unlock();
+}
+
+int main(int argc, char * argv[]) try{
 	context ctx;
 	auto devices = ctx.query_devices();
 	size_t device_count = devices.size();
-	if (!device_count)
-	{
+	if (!device_count){
 		cout << "No device detected. Is it plugged in?\n";
 		return EXIT_SUCCESS;
 	}
 	auto dev = devices[0];
-	if (dev.is<rs400::advanced_mode>())
-	{
+	if (dev.is<rs400::advanced_mode>()){
 		auto advanced_mode_dev = dev.as<rs400::advanced_mode>();
 		// Check if advanced-mode is enabled
-		if (!advanced_mode_dev.is_enabled())
-		{
+		if (!advanced_mode_dev.is_enabled()){
 			// Enable advanced-mode
 			advanced_mode_dev.toggle_advanced_mode(true);
 		}
 	}
-	else
-	{
+	else{
 		cout << "Current device doesn't support advanced-mode!\n";
 		return EXIT_FAILURE;
 	}
 
-
-	clock_t t;
-    // Create and initialize GUI related objects
-    window app(640, 480, "CPP - Align Example"); // Simple window handling
-    ImGui_ImplGlfw_Init(app, false);      // ImGui library intializition
-    rs2::colorizer c;                          // Helper to colorize depth images
-    texture renderer;                     // Helper for renderig images
+	clock_t time, time2, time3;
 
     // Create a pipeline to easily configure and start the camera
     rs2::pipeline pipe;
@@ -66,19 +94,51 @@ int main(int argc, char * argv[]) try
     //The start function returns the pipeline profile which the pipeline used to start the device
     rs2::pipeline_profile profile = pipe.start();
 	////////////////////////
+	auto config_profile = profile.get_stream(RS2_STREAM_COLOR).as<video_stream_profile>();
+	Size cropSize;
+	if (config_profile.width() / (float)config_profile.height() > WHRatio){
+		cropSize = Size(static_cast<int>(config_profile.height() * WHRatio),
+			config_profile.height());
+	}
+	else{
+		cropSize = Size(config_profile.width(),
+			static_cast<int>(config_profile.width() / WHRatio));
+	}
 
-	std::ifstream config("F:/labconfig415ground.json");
+	Rect crop(Point((config_profile.width() - cropSize.width) / 2,
+		(config_profile.height() - cropSize.height) / 2),
+		cropSize);
+
+	const auto window_name = "Display Image";
+	namedWindow(window_name, WINDOW_AUTOSIZE);
+
+
+	namedWindow("Control", CV_WINDOW_AUTOSIZE); //create a window called "Control"
+
+	int iLowH = 0;
+	int iHighH = 38;
+	int iLowS = 71;
+	int iHighS = 255;
+	int iLowV = 203;
+	int iHighV = 255;
+
+	//Create trackbars in "Control" window
+	cvCreateTrackbar("LowH", "Control", &iLowH, 179); //Hue (0 - 179)
+	cvCreateTrackbar("HighH", "Control", &iHighH, 179);
+
+	cvCreateTrackbar("LowS", "Control", &iLowS, 255); //Saturation (0 - 255)
+	cvCreateTrackbar("HighS", "Control", &iHighS, 255);
+
+	cvCreateTrackbar("LowV", "Control", &iLowV, 255); //Value (0 - 255)
+	cvCreateTrackbar("HighV", "Control", &iHighV, 255);
+
+	std::ifstream config("F:/config.json");
 	std::string str((std::istreambuf_iterator<char>(config)),
 		std::istreambuf_iterator<char>());
 	rs400::advanced_mode dev4json = profile.get_device();
 	dev4json.load_json(str);
 
 	/////////////////////
-
-    // Each depth camera might have different units for depth pixels, so we get it here
-    // Using the pipeline's profile, we can retrieve the device that the pipeline uses
-    float depth_scale = get_depth_scale(profile.get_device());
-
     //Pipeline could choose a device that does not have a color stream
     //If there is no color stream, choose to align depth to another stream
     rs2_stream align_to = find_stream_to_align(profile.get_streams());
@@ -91,83 +151,95 @@ int main(int argc, char * argv[]) try
     // Define a variable for controlling the distance to clip
     float depth_clipping_distance = 1.f;
 
-    while (app) // Application still alive?
-    {
-        // Using the align object, we block the application until a frameset is available
-		t = clock();
-        rs2::frameset frameset = pipe.wait_for_frames();
-		t = clock() - t;
-		cout << "0000   " << 1000*((double)t) / CLOCKS_PER_SEC << endl;
+    rs2::frameset frameset1, frameset2;
+	frameset1 = frameset2 = pipe.wait_for_frames();
+    rs2::frameset *latest_frameset, *new_frameset;
+	latest_frameset = &frameset1;
+	new_frameset = &frameset2;
 
-        // rs2::pipeline::wait_for_frames() can replace the device it uses in case of device error or disconnection.
-        // Since rs2::align is aligning depth to some other stream, we need to make sure that the stream was not changed
-        //  after the call to wait_for_frames();
-        if (profile_changed(pipe.get_active_profile().get_streams(), profile.get_streams()))
-        {
-            //If the profile was changed, update the align object, and also get the new device's depth scale
-			t = clock();
-			profile = pipe.get_active_profile();
-			t = clock() - t;
-			cout <<"1111"<< ((float)t) / CLOCKS_PER_SEC << endl;
-			t = clock();
-            align_to = find_stream_to_align(profile.get_streams());
-			t = clock() - t;
-			cout << "2222" << ((float)t) / CLOCKS_PER_SEC << endl;
-			t = clock();
-            align = rs2::align(align_to);
-			t = clock() - t;
-			cout << "3333" << ((float)t) / CLOCKS_PER_SEC << endl;
-			t = clock();
-            depth_scale = get_depth_scale(profile.get_device());
-			t = clock() - t;
-			cout << "4444" << ((float)t) / CLOCKS_PER_SEC << endl;
-        }
+    std::thread t{ get_video, pipe, latest_frameset, new_frameset };
+    t.detach();
+	std::chrono::milliseconds dura(100);
+	std::this_thread::sleep_for(dura);
+	auto processed = align.process(*latest_frameset);
+	rs2::video_frame color_frame = processed.get_color_frame();
+	rs2::depth_frame depth_frame = processed.get_depth_frame();
+	Mat color_mat = frame_to_mat(color_frame);
+	Mat depth_mat = depth_frame_to_meters(pipe, depth_frame);
+	Mat new_color_mat = color_mat;
+	Mat new_depth_mat = depth_mat;
 
-        //Get processed aligned frame
-        auto processed = align.process(frameset);
+	Mat *pt_color_mat, *pt_new_color_mat;
+	Mat *pt_depth_mat, *pt_new_depth_mat;
+	pt_color_mat = pt_new_color_mat = &color_mat;
+	pt_depth_mat = pt_new_depth_mat = &depth_mat;
+	std::thread t2{ frame_transfer, align, pipe, latest_frameset, pt_color_mat,pt_new_color_mat,pt_depth_mat,pt_new_depth_mat };
+	t2.detach();
+	std::this_thread::sleep_for(dura);
 
-        // Trying to get both other and aligned depth frames
-        rs2::video_frame other_frame = processed.first(align_to);
-        rs2::depth_frame aligned_depth_frame = processed.get_depth_frame();
+    while (cvGetWindowHandle(window_name)){ // Application still alive?
+		time = clock();
 
-        //If one of them is unavailable, continue iteration
-        if (!aligned_depth_frame || !other_frame)
-        {
-            continue;
-        }
-        // Passing both frames to remove_background so it will "strip" the background
-        // NOTE: in this example, we alter the buffer of the other frame, instead of copying it and altering the copy
-        //       This behavior is not recommended in real application since the other frame could be used elsewhere
-        remove_background(other_frame, aligned_depth_frame, depth_scale, depth_clipping_distance);
+		Mat Gcolor_mat;
+		GaussianBlur(*pt_color_mat, Gcolor_mat, Size(11, 11), 0);
+		Gcolor_mat = Gcolor_mat(crop);
+		auto depth_mat2 = (*pt_depth_mat)(crop);
+		Mat imgHSV;
+		vector<Mat> hsvSplit;
+		cvtColor(Gcolor_mat, imgHSV, COLOR_BGR2HSV);
+		split(imgHSV, hsvSplit);
+		equalizeHist(hsvSplit[2], hsvSplit[2]);
+		merge(hsvSplit, imgHSV);
+		Mat imgThresholded;
+		inRange(imgHSV, Scalar(iLowH, iLowS, iLowV), Scalar(iHighH, iHighS, iHighV), imgThresholded);
+		Mat element = getStructuringElement(MORPH_RECT, Size(5, 5));
+		morphologyEx(imgThresholded, imgThresholded, MORPH_OPEN, element);
+		morphologyEx(imgThresholded, imgThresholded, MORPH_CLOSE, element);
+		vector<vector<cv::Point>> contours;
+		cv::findContours(imgThresholded, contours, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+		double maxArea = 0;
+		vector<cv::Point> maxContour;
 
-        // Taking dimensions of the window for rendering purposes
-        float w = static_cast<float>(app.width());
-        float h = static_cast<float>(app.height());
+		for (size_t i = 0; i < contours.size(); i++){
+			double area = cv::contourArea(contours[i]);
+			if (area > maxArea){
+				maxArea = area;
+				maxContour = contours[i];
+			}
+		}
+		cv::Rect maxRect = cv::boundingRect(maxContour);
 
-        // At this point, "other_frame" is an altered frame, stripped form its background
-        // Calculating the position to place the frame in the window
-        rect altered_other_frame_rect{ 0, 0, w, h };
-        altered_other_frame_rect = altered_other_frame_rect.adjust_ratio({ static_cast<float>(other_frame.get_width()),static_cast<float>(other_frame.get_height()) });
+		// auto object =  maxRect & Rect (0,0,depth_mat.cols, depth_mat.rows );
+		auto object = maxRect;
+		auto moment = cv::moments(maxContour, true);
 
-        // Render aligned image
-        renderer.render(other_frame, altered_other_frame_rect);
+		Scalar depth_m;
+		if (moment.m00 == 0) {
+			moment.m00 = 1;
+		}
+		Point moment_center(moment.m10 / moment.m00, moment.m01 / moment.m00);
+		depth_m = depth_mat2.at<double>((int)moment.m01 / moment.m00, (int)moment.m10 / moment.m00);
+		double magic_distance = depth_m[0] * 1.062;
+		std::ostringstream ss;
+		ss << " Ball Detected ";
+		ss << std::setprecision(3) << magic_distance << " meters away";
+		String conf(ss.str());
 
-        // The example also renders the depth frame, as a picture-in-picture
-        // Calculating the position to place the depth frame in the window
-        rect pip_stream{ 0, 0, w / 5, h / 5 };
-        pip_stream = pip_stream.adjust_ratio({ static_cast<float>(aligned_depth_frame.get_width()),static_cast<float>(aligned_depth_frame.get_height()) });
-        pip_stream.x = altered_other_frame_rect.x + altered_other_frame_rect.w - pip_stream.w - (std::max(w, h) / 25);
-        pip_stream.y = altered_other_frame_rect.y + (std::max(w, h) / 25);
-
-        // Render depth (as picture in pipcture)
-        renderer.upload(c.process(aligned_depth_frame));
-        renderer.show(pip_stream);
-
-        // Using ImGui library to provide a slide controller to select the depth clipping distance
-        ImGui_ImplGlfw_NewFrame(1);
-        render_slider({ 5.f, 0, w, h }, depth_clipping_distance);
-        ImGui::Render();
-
+		rectangle(Gcolor_mat, object, Scalar(0, 255, 0));
+		int baseLine = 0;
+		Size labelSize = getTextSize(ss.str(), FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseLine);
+		auto center = (object.br() + object.tl())*0.5;
+		center.x = center.x - labelSize.width / 2;
+		center.y = center.y + 30;
+		rectangle(Gcolor_mat, Rect(Point(center.x, center.y - labelSize.height),
+			Size(labelSize.width, labelSize.height + baseLine)),
+			Scalar(255, 255, 255), CV_FILLED);
+		putText(Gcolor_mat, ss.str(), center,
+			FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 0, 0));
+		imshow(window_name, Gcolor_mat);
+		waitKey(3);
+		cout << "All   " << 1000 * ((double)(clock() - time)) / CLOCKS_PER_SEC << endl;
+		
     }
     return EXIT_SUCCESS;
 }
@@ -182,88 +254,6 @@ catch (const std::exception & e)
     return EXIT_FAILURE;
 }
 
-float get_depth_scale(rs2::device dev)
-{
-    // Go over the device's sensors
-    for (rs2::sensor& sensor : dev.query_sensors())
-    {
-        // Check if the sensor if a depth sensor
-        if (rs2::depth_sensor dpt = sensor.as<rs2::depth_sensor>())
-        {
-            return dpt.get_depth_scale();
-        }
-    }
-    throw std::runtime_error("Device does not have a depth sensor");
-}
-
-void render_slider(rect location, float& clipping_dist)
-{
-    // Some trickery to display the control nicely
-    static const int flags = ImGuiWindowFlags_NoCollapse
-        | ImGuiWindowFlags_NoScrollbar
-        | ImGuiWindowFlags_NoSavedSettings
-        | ImGuiWindowFlags_NoTitleBar
-        | ImGuiWindowFlags_NoResize
-        | ImGuiWindowFlags_NoMove;
-    const int pixels_to_buttom_of_stream_text = 25;
-    const float slider_window_width = 30;
-
-    ImGui::SetNextWindowPos({ location.x, location.y + pixels_to_buttom_of_stream_text });
-    ImGui::SetNextWindowSize({ slider_window_width + 20, location.h - (pixels_to_buttom_of_stream_text * 2) });
-
-    //Render the vertical slider
-    ImGui::Begin("slider", nullptr, flags);
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImColor(215.f / 255, 215.0f / 255, 215.0f / 255));
-    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImColor(215.f / 255, 215.0f / 255, 215.0f / 255));
-    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImColor(215.f / 255, 215.0f / 255, 215.0f / 255));
-    auto slider_size = ImVec2(slider_window_width / 2, location.h - (pixels_to_buttom_of_stream_text * 2) - 20);
-    ImGui::VSliderFloat("", slider_size, &clipping_dist, 0.0f, 6.0f, "", 1.0f, true);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Depth Clipping Distance: %.3f", clipping_dist);
-    ImGui::PopStyleColor(3);
-
-    //Display bars next to slider
-    float bars_dist = (slider_size.y / 6.0f);
-    for (int i = 0; i <= 6; i++)
-    {
-        ImGui::SetCursorPos({ slider_size.x, i * bars_dist });
-        std::string bar_text = "- " + std::to_string(6-i) + "m";
-        ImGui::Text("%s", bar_text.c_str());
-    }
-    ImGui::End();
-}
-
-void remove_background(rs2::video_frame& other_frame, const rs2::depth_frame& depth_frame, float depth_scale, float clipping_dist)
-{
-    const uint16_t* p_depth_frame = reinterpret_cast<const uint16_t*>(depth_frame.get_data());
-    uint8_t* p_other_frame = reinterpret_cast<uint8_t*>(const_cast<void*>(other_frame.get_data()));
-
-    int width = other_frame.get_width();
-    int height = other_frame.get_height();
-    int other_bpp = other_frame.get_bytes_per_pixel();
-
-    #pragma omp parallel for schedule(dynamic) //Using OpenMP to try to parallelise the loop
-    for (int y = 0; y < height; y++)
-    {
-        auto depth_pixel_index = y * width;
-        for (int x = 0; x < width; x++, ++depth_pixel_index)
-        {
-            // Get the depth value of the current pixel
-            auto pixels_distance = depth_scale * p_depth_frame[depth_pixel_index];
-
-            // Check if the depth value is invalid (<=0) or greater than the threashold
-            if (pixels_distance <= 0.f || pixels_distance > clipping_dist)
-            {
-                // Calculate the offset in other frame's buffer to current pixel
-                auto offset = depth_pixel_index * other_bpp;
-
-                // Set pixel to "background" color (0x999999)
-                std::memset(&p_other_frame[offset], 0x99, other_bpp);
-            }
-        }
-    }
-}
-
 rs2_stream find_stream_to_align(const std::vector<rs2::stream_profile>& streams)
 {
     //Given a vector of streams, we try to find a depth stream and another stream to align depth with.
@@ -272,21 +262,17 @@ rs2_stream find_stream_to_align(const std::vector<rs2::stream_profile>& streams)
     rs2_stream align_to = RS2_STREAM_ANY;
     bool depth_stream_found = false;
     bool color_stream_found = false;
-    for (rs2::stream_profile sp : streams)
-    {
+    for (rs2::stream_profile sp : streams){
         rs2_stream profile_stream = sp.stream_type();
-        if (profile_stream != RS2_STREAM_DEPTH)
-        {
+        if (profile_stream != RS2_STREAM_DEPTH){
             if (!color_stream_found)         //Prefer color
                 align_to = profile_stream;
 
-            if (profile_stream == RS2_STREAM_COLOR)
-            {
+            if (profile_stream == RS2_STREAM_COLOR){
                 color_stream_found = true;
             }
         }
-        else
-        {
+        else{
             depth_stream_found = true;
         }
     }
@@ -298,18 +284,4 @@ rs2_stream find_stream_to_align(const std::vector<rs2::stream_profile>& streams)
         throw std::runtime_error("No stream found to align with Depth");
 
     return align_to;
-}
-
-bool profile_changed(const std::vector<rs2::stream_profile>& current, const std::vector<rs2::stream_profile>& prev)
-{
-    for (auto&& sp : prev)
-    {
-        //If previous profile is in current (maybe just added another)
-        auto itr = std::find_if(std::begin(current), std::end(current), [&sp](const rs2::stream_profile& current_sp) { return sp.unique_id() == current_sp.unique_id(); });
-        if (itr == std::end(current)) //If it previous stream wasn't found in current
-        {
-            return true;
-        }
-    }
-    return false;
 }
