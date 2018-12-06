@@ -158,7 +158,7 @@ int main(int argc, char * argv[]) try{
 	cvCreateTrackbar("LowV", "Control", &iLowV, 255); //Value (0 - 255)
 	cvCreateTrackbar("HighV", "Control", &iHighV, 255);
 
-	std::ifstream config("F:/config2.json");
+	std::ifstream config("F:/config.json");
 	std::string str((std::istreambuf_iterator<char>(config)),
 		std::istreambuf_iterator<char>());
 	rs400::advanced_mode dev4json = profile.get_device();
@@ -177,29 +177,24 @@ int main(int argc, char * argv[]) try{
     // Define a variable for controlling the distance to clip
     float depth_clipping_distance = 1.f;
 
-    rs2::frameset frameset1, frameset2;
-	frameset1 = frameset2 = pipe.wait_for_frames();
-    rs2::frameset *latest_frameset, *new_frameset;
-	latest_frameset = &frameset1;
-	new_frameset = &frameset2;
+    rs2::frameset new_frameset, latest_frameset;
+	new_frameset = latest_frameset = pipe.wait_for_frames();
 
-    std::thread t{ get_video, pipe, latest_frameset, new_frameset };
+    std::thread t{ get_video, pipe, &latest_frameset, &new_frameset };
     t.detach();
+
 	std::chrono::milliseconds dura(100);
 	std::this_thread::sleep_for(dura);
-	auto processed = align.process(*latest_frameset);
+
+	auto processed = align.process(latest_frameset);
 	rs2::video_frame color_frame = processed.get_color_frame();
 	rs2::depth_frame depth_frame = processed.get_depth_frame();
-	Mat color_mat = frame_to_mat(color_frame);
-	Mat depth_mat = depth_frame_to_meters(pipe, depth_frame);
-	Mat new_color_mat = color_mat;
-	Mat new_depth_mat = depth_mat;
+	Mat latest_color_mat = frame_to_mat(color_frame);
+	Mat latest_depth_mat = depth_frame_to_meters(pipe, depth_frame);
+	Mat new_color_mat = latest_color_mat;
+	Mat new_depth_mat = latest_depth_mat;
 
-	Mat *pt_color_mat, *pt_new_color_mat;
-	Mat *pt_depth_mat, *pt_new_depth_mat;
-	pt_color_mat = pt_new_color_mat = &color_mat;
-	pt_depth_mat = pt_new_depth_mat = &depth_mat;
-	std::thread t2{ frame_transfer, align, pipe, latest_frameset, pt_color_mat,pt_new_color_mat,pt_depth_mat,pt_new_depth_mat };
+	std::thread t2{ frame_transfer, align, pipe, &latest_frameset, &latest_color_mat,&new_color_mat,&latest_depth_mat,&new_depth_mat };
 	t2.detach();
 	std::this_thread::sleep_for(dura);
 
@@ -207,12 +202,12 @@ int main(int argc, char * argv[]) try{
 		time = clock();
 
 		Mat Gcolor_mat;
-		GaussianBlur(*pt_color_mat, Gcolor_mat, Size(11, 11), 0);
+		GaussianBlur(latest_color_mat, Gcolor_mat, Size(11, 11), 0);
 		cvtColor(Gcolor_mat, Gcolor_mat, COLOR_BGR2RGB);
 		//imshow(window_name, Gcolor_mat);
 
 		Gcolor_mat = Gcolor_mat(crop);
-		auto depth_mat2 = (*pt_depth_mat)(crop);
+		auto depth_mat2 = latest_depth_mat(crop);
 		Mat imgHSV;
 		vector<Mat> hsvSplit;
 		cvtColor(Gcolor_mat, imgHSV, COLOR_BGR2HSV);
