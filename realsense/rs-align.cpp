@@ -80,13 +80,15 @@ void get_video(rs2::pipeline &pipe, rs2::frameset *latest_frameset, rs2::framese
 }
 
 void frame_transfer(rs2::align &align, rs2::pipeline &pipe, rs2::frameset *latest_frameset, Mat *pt_color_mat, Mat *pt_new_color_mat, Mat *pt_depth_mat, Mat *pt_new_depth_mat) {
-	auto processed = align.process(*latest_frameset);
-	rs2::video_frame color_frame = processed.get_color_frame();
-	rs2::depth_frame depth_frame = processed.get_depth_frame();
-	*pt_new_color_mat = frame_to_mat(color_frame);
-	*pt_new_depth_mat = depth_frame_to_meters(pipe, depth_frame);
-	change(pt_color_mat, pt_new_color_mat);
-	change(pt_depth_mat, pt_new_depth_mat);
+	while (true) {
+		auto processed = align.process(*latest_frameset);
+		rs2::video_frame color_frame = processed.get_color_frame();
+		rs2::depth_frame depth_frame = processed.get_depth_frame();
+		*pt_new_color_mat = frame_to_mat(color_frame);
+		*pt_new_depth_mat = depth_frame_to_meters(pipe, depth_frame);
+		change(pt_color_mat, pt_new_color_mat);
+		change(pt_depth_mat, pt_new_depth_mat);
+	}
 }
 
 int main(int argc, char * argv[]) try{
@@ -203,7 +205,7 @@ int main(int argc, char * argv[]) try{
 
 		Mat Gcolor_mat;
 		GaussianBlur(latest_color_mat, Gcolor_mat, Size(11, 11), 0);
-		cvtColor(Gcolor_mat, Gcolor_mat, COLOR_BGR2RGB);
+		//cvtColor(Gcolor_mat, Gcolor_mat, COLOR_BGR2RGB);
 		//imshow(window_name, Gcolor_mat);
 
 		Gcolor_mat = Gcolor_mat(crop);
